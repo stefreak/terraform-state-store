@@ -1,7 +1,11 @@
 package inmemory
 
-import "sync"
-import "github.com/stefreak/terraform-state-store/storage"
+import (
+	"sync"
+
+	"github.com/pkg/errors"
+	"github.com/stefreak/terraform-state-store/storage"
+)
 
 // NewStateStore inmemory should only be used for testing purposes.
 // It does not persist data across restarts, and it does not support namespaces or deleting right now.
@@ -47,7 +51,7 @@ func (s *inMemoryStateStore) Update(namespace string, identifier string, content
 	}
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Could not get")
 	}
 
 	if state.IsLocked && lockID != state.LockID {
@@ -63,10 +67,10 @@ func (s *inMemoryStateStore) Lock(namespace string, identifier string, lockID st
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	state, error := s.get(namespace, identifier)
+	state, err := s.get(namespace, identifier)
 
-	if error != nil {
-		return "", error
+	if err != nil {
+		return "", errors.Wrap(err, "Could not get")
 	}
 
 	if state.IsLocked {
@@ -94,7 +98,7 @@ func (s *inMemoryStateStore) unlock(namespace string, identifier string, lockID 
 	state, err := s.get(namespace, identifier)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Could not get")
 	}
 
 	if !state.IsLocked {

@@ -116,8 +116,7 @@ func lockState(c *gin.Context) {
 	existingLockID, err := store.Lock(
 		c.MustGet(namespaceKey).(string),
 		c.Param("id"),
-		lock.ID,
-	)
+		lock.ID)
 
 	if err == storage.ErrorNotFound {
 		// Terraform assumes that state already exists
@@ -126,14 +125,12 @@ func lockState(c *gin.Context) {
 			c.MustGet(namespaceKey).(string),
 			c.Param("id"),
 			"",
-			"",
-		)
+			"")
 		if err != nil {
 			_, err = store.Lock(
 				c.MustGet(namespaceKey).(string),
 				c.Param("id"),
-				lock.ID,
-			)
+				lock.ID)
 		}
 	}
 
@@ -169,13 +166,11 @@ func unlockState(c *gin.Context) {
 		err = store.Unlock(
 			c.MustGet(namespaceKey).(string),
 			c.Param("id"),
-			lock.ID,
-		)
+			lock.ID)
 	} else {
 		err = store.ForceUnlock(
 			c.MustGet(namespaceKey).(string),
-			c.Param("id"),
-		)
+			c.Param("id"))
 	}
 
 	if err == storage.ErrorLockedConflict {
@@ -207,8 +202,7 @@ func unlockState(c *gin.Context) {
 func deleteState(c *gin.Context) {
 	err := store.Delete(
 		c.MustGet(namespaceKey).(string),
-		c.Param("id"),
-	)
+		c.Param("id"))
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
