@@ -9,13 +9,16 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/stefreak/terraform-state-store/stores"
+	"github.com/stefreak/terraform-state-store/auth"
+	"github.com/stefreak/terraform-state-store/auth/dummy"
+	"github.com/stefreak/terraform-state-store/storage"
+	"github.com/stefreak/terraform-state-store/storage/inmemory"
 )
 
 var (
-	store           stores.TerraformStateStore
-	authUserKey     string = "user"
-	authPasswordKey string = "password"
+	store        storage.StateStore
+	validator    auth.Validator
+	namespaceKey = "namespace"
 )
 
 func getHelp(c *gin.Context) {
@@ -25,20 +28,19 @@ func getHelp(c *gin.Context) {
 }
 
 func getState(c *gin.Context) {
-	state, error := store.RetrieveState(
-		c.MustGet(authUserKey).(string),
-		c.MustGet(authPasswordKey).(string),
+	state, err := store.Get(
+		c.MustGet(namespaceKey).(string),
 		c.Param("id"))
 
-	if error == stores.ErrorNotFound {
+	if err == storage.ErrorNotFound {
 		c.JSON(http.StatusNotFound, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
@@ -47,35 +49,34 @@ func getState(c *gin.Context) {
 }
 
 func setState(c *gin.Context) {
-	data, error := c.GetRawData()
+	data, err := c.GetRawData()
 
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
 
 	lockID, _ := c.GetQuery("ID")
 
-	error = store.UpdateState(
-		c.MustGet(authUserKey).(string),
-		c.MustGet(authPasswordKey).(string),
+	err = store.Update(
+		c.MustGet(namespaceKey).(string),
 		c.Param("id"),
 		string(data),
 		lockID,
 	)
 
-	if error == stores.ErrorLockedConflict {
+	if err == storage.ErrorLockedConflict {
 		c.JSON(http.StatusConflict, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
 
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
@@ -85,44 +86,54 @@ func setState(c *gin.Context) {
 	})
 }
 
-type LockBody struct {
+type lockBody struct {
 	ID string `json:"ID"`
 }
 
 func lockState(c *gin.Context) {
-	var lock LockBody
-	error := c.BindJSON(&lock)
+	var lock lockBody
+	err := c.BindJSON(&lock)
 
-	if error != nil {
+	if err != nil {
 		// gin already sent bad request response
 		return
 	}
 
-	existingLockID, error := store.LockState(
-		c.MustGet(authUserKey).(string),
-		c.MustGet(authPasswordKey).(string),
+	existingLockID, err := store.Lock(
+		c.MustGet(namespaceKey).(string),
 		c.Param("id"),
 		lock.ID,
 	)
 
-	if error == stores.ErrorLockedConflict {
+	if err == storage.ErrorNotFound {
+		// Terraform assumes that state already exists
+		// Create empty state
+		err = store.Update(
+			c.MustGet(namespaceKey).(string),
+			c.Param("id"),
+			"",
+			"",
+		)
+		if err != nil {
+			_, err = store.Lock(
+				c.MustGet(namespaceKey).(string),
+				c.Param("id"),
+				lock.ID,
+			)
+		}
+	}
+
+	if err == storage.ErrorLockedConflict {
 		c.JSON(http.StatusConflict, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 			"ID":    existingLockID,
 		})
 		return
 	}
 
-	if error == stores.ErrorNotFound {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": error.Error(),
-		})
-		return
-	}
-
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
@@ -133,35 +144,43 @@ func lockState(c *gin.Context) {
 }
 
 func unlockState(c *gin.Context) {
-	var lock LockBody
+	var lock lockBody
 
 	// XXX: I believe it is a terraform bug, that lock ID is not always sent as body payload
-	// when that is fixed we can change this line back to BindJSON
+	// when that is fixed we can change this line back to BindJSON (which would abort with bad request)
 	c.ShouldBindJSON(&lock)
 
-	error := store.UnlockState(
-		c.MustGet(authUserKey).(string),
-		c.MustGet(authPasswordKey).(string),
-		c.Param("id"),
-		lock.ID)
+	var err error
+	if lock.ID != "" {
+		err = store.Unlock(
+			c.MustGet(namespaceKey).(string),
+			c.Param("id"),
+			lock.ID,
+		)
+	} else {
+		err = store.ForceUnlock(
+			c.MustGet(namespaceKey).(string),
+			c.Param("id"),
+		)
+	}
 
-	if error == stores.ErrorLockedConflict {
+	if err == storage.ErrorLockedConflict {
 		c.JSON(http.StatusConflict, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
 
-	if error == stores.ErrorNotFound {
+	if err == storage.ErrorNotFound {
 		c.JSON(http.StatusNotFound, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
 
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
@@ -172,15 +191,14 @@ func unlockState(c *gin.Context) {
 }
 
 func deleteState(c *gin.Context) {
-	error := store.DeleteState(
-		c.MustGet(authUserKey).(string),
-		c.MustGet(authPasswordKey).(string),
+	err := store.Delete(
+		c.MustGet(namespaceKey).(string),
 		c.Param("id"),
 	)
 
-	if error != nil {
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": error.Error(),
+			"error": err.Error(),
 		})
 		return
 	}
@@ -200,8 +218,8 @@ func BasicAuth() gin.HandlerFunc {
 
 		auth := strings.SplitN(c.Request.Header.Get("Authorization"), " ", 2)
 		if len(auth) == 2 {
-			auth, error := base64.StdEncoding.DecodeString(auth[1])
-			if error == nil {
+			auth, err := base64.StdEncoding.DecodeString(auth[1])
+			if err == nil {
 				authParts := strings.SplitN(string(auth), ":", 2)
 				if len(authParts) == 2 {
 					username = authParts[0]
@@ -211,17 +229,20 @@ func BasicAuth() gin.HandlerFunc {
 			}
 		}
 
-		if !found || store.ValidateAuth(username, password) != nil {
-			// Credentials doesn't match, we return 401 and abort handlers chain.
-			c.Header("WWW-Authenticate", realm)
-			c.AbortWithStatus(http.StatusUnauthorized)
-			return
+		if found {
+			namespace, err := validator.Validate(username, password)
+
+			if err == nil {
+				// Can be later retrieved with
+				// c.MustGet(namespaceKey).
+				c.Set(namespaceKey, namespace)
+				return
+			}
 		}
 
-		// Can be later retrieved with
-		// c.MustGet(authUserKey).
-		c.Set(authUserKey, username)
-		c.Set(authPasswordKey, username)
+		// Credentials doesn't match, we return 401 and abort handlers chain.
+		c.Header("WWW-Authenticate", realm)
+		c.AbortWithStatus(http.StatusUnauthorized)
 	}
 }
 
@@ -230,12 +251,13 @@ func main() {
 		port = flag.Int("listen-port", 8080, "HTTP Server listen port")
 	)
 
-	store = stores.NewInMemoryTerraformStateStore()
+	store = inmemory.NewStateStore()
+	validator = dummy.NewValidator()
 
 	r := gin.Default()
 	r.GET("/", getHelp)
 
-	authorized := r.Group("/", BasicAuth())
+	authorized := r.Group("/v1/states", BasicAuth())
 	authorized.GET("/:id", getState)
 	authorized.POST("/:id", setState)
 	authorized.DELETE("/:id", deleteState)
