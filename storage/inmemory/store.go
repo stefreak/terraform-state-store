@@ -45,7 +45,7 @@ func (s *inMemoryStateStore) Update(namespace string, identifier string, content
 
 	state, err := s.get(namespace, identifier)
 
-	if err == storage.ErrorNotFound {
+	if errors.Cause(err) == storage.ErrorNotFound {
 		s.items = append(s.items, storage.NewTerraformState(namespace, identifier, contents))
 		return nil
 	}

@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 	"github.com/stefreak/terraform-state-store/auth"
 	"github.com/stefreak/terraform-state-store/storage"
 )
@@ -25,7 +27,7 @@ func Run(listen string, s storage.StateStore, v auth.Validator) {
 	r := gin.Default()
 	r.GET("/", getHelp)
 
-	authorized := r.Group("/v1/states", basicAuth())
+	authorized := r.Group("/v1/state", basicAuth())
 	authorized.GET("/:id", getState)
 	authorized.POST("/:id", setState)
 	authorized.DELETE("/:id", deleteState)
@@ -46,7 +48,7 @@ func getState(c *gin.Context) {
 		c.MustGet(namespaceKey).(string),
 		c.Param("id"))
 
-	if err == storage.ErrorNotFound {
+	if errors.Cause(err) == storage.ErrorNotFound {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": err.Error(),
 		})
@@ -81,7 +83,7 @@ func setState(c *gin.Context) {
 		lockID,
 	)
 
-	if err == storage.ErrorLockedConflict {
+	if errors.Cause(err) == storage.ErrorLockedConflict {
 		c.JSON(http.StatusConflict, gin.H{
 			"error": err.Error(),
 		})
@@ -113,12 +115,41 @@ func lockState(c *gin.Context) {
 		return
 	}
 
-	existingLockID, err := store.Lock(
-		c.MustGet(namespaceKey).(string),
-		c.Param("id"),
-		lock.ID)
+	lockRetries := 120
+	var existingLockID string
+	for {
+		existingLockID, err = store.Lock(
+			c.MustGet(namespaceKey).(string),
+			c.Param("id"),
+			lock.ID)
 
-	if err == storage.ErrorNotFound {
+		if errors.Cause(err) == storage.ErrorLockedConflict {
+			select {
+			case closed := <-c.Writer.CloseNotify():
+				if closed {
+					c.AbortWithStatus(400)
+					return
+				}
+			case <-time.After(1 * time.Second):
+				if lockRetries > 0 && !c.IsAborted() {
+					time.Sleep(1 * time.Second)
+					lockRetries--
+					continue
+				}
+			}
+
+			// No more retries
+			c.JSON(http.StatusConflict, gin.H{
+				"error": err.Error(),
+				"ID":    existingLockID,
+			})
+			return
+		}
+
+		break
+	}
+
+	if errors.Cause(err) == storage.ErrorNotFound {
 		// Terraform assumes that state already exists
 		// Create empty state
 		err = store.Update(
@@ -126,20 +157,12 @@ func lockState(c *gin.Context) {
 			c.Param("id"),
 			"",
 			"")
-		if err != nil {
+		if err == nil {
 			_, err = store.Lock(
 				c.MustGet(namespaceKey).(string),
 				c.Param("id"),
 				lock.ID)
 		}
-	}
-
-	if err == storage.ErrorLockedConflict {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": err.Error(),
-			"ID":    existingLockID,
-		})
-		return
 	}
 
 	if err != nil {
@@ -173,14 +196,14 @@ func unlockState(c *gin.Context) {
 			c.Param("id"))
 	}
 
-	if err == storage.ErrorLockedConflict {
+	if errors.Cause(err) == storage.ErrorLockedConflict {
 		c.JSON(http.StatusConflict, gin.H{
 			"error": err.Error(),
 		})
 		return
 	}
 
-	if err == storage.ErrorNotFound {
+	if errors.Cause(err) == storage.ErrorNotFound {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": err.Error(),
 		})
