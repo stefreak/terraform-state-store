@@ -132,7 +132,6 @@ func lockState(c *gin.Context) {
 				}
 			case <-time.After(1 * time.Second):
 				if lockRetries > 0 && !c.IsAborted() {
-					time.Sleep(1 * time.Second)
 					lockRetries--
 					continue
 				}
